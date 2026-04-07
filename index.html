@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Space Mathematics</title>
+    
+    <!-- Three.js for 3D rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+        }
+
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        .instructions {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 255, 255, 0.1);
+            padding: 12px 24px;
+            border-radius: 30px;
+            backdrop-filter: blur(5px);
+            z-index: 10;
+            letter-spacing: 1px;
+            font-size: 0.9rem;
+            border: 1px solid rgba(255,255,255,0.2);
+            pointer-events: none;
+            transition: opacity 0.3s;
+        }
+
+        @media (max-width: 768px) {
+            .instructions {
+                bottom: 15px;
+                width: 80%;
+                text-align: center;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div class="instructions" id="instructions">
+        Hold <b>[CLICK]</b> or <b>[TOUCH]</b> to engage Hyperdrive
+    </div>
+
+    <script>
+        // --- MATHEMATICAL CONSTANTS & SIMULATION STATE ---
+        const STATE = {
+            baseSpeed: 50,         // Base travel speed (units per second)
+            warpSpeed: 1500,       // Speed when accelerating
+            currentSpeed: 50,      // Evolving velocity
+            acceleration: 4000,    // Rate of speed increase
+            deceleration: 2000,    // Rate of speed decrease
+            distanceTraveled: 0,   // Integral of speed over time
+            isAccelerating: false, // User interaction state
+            
+            domainDepth: 2000,     // Total z-distance of the simulation volume
+            zMin: -1000,           // Furthest point from camera (spawn point)
+            
+            baseFov: 60,           // Base Field of View
+            maxFov: 110            // Max Field of View under high velocity
+        };
+
+        const instructions = document.getElementById('instructions');
+
+        // --- THREE.JS SETUP ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.0008); // Exponential fog for depth fading
+
+        const camera = new THREE.PerspectiveCamera(STATE.baseFov, window.innerWidth / window.innerHeight, 0.1, 3000);
+        camera.position.z = 0; // Camera is at the origin
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Optimize for high DPI
+        container.appendChild(renderer.domElement);
+
+        // --- PROCEDURAL ASSET GENERATION (Star Glow) ---
+        // We mathematically generate a radial gradient texture for the stars
+        function createStarTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            
+            const gradient = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');      // Hot core
+            gradient.addColorStop(0.1, 'rgba(200, 220, 255, 0.8)');  // Corona
+            gradient.addColorStop(0.4, 'rgba(64, 128, 255, 0.2)');   // Halo
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');            // Vacuum
+            
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 32, 32);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // --- PARTICLE SYSTEM (THE STARS) ---
+        const numStars = 15000;
+        const geometry = new THREE.BufferGeometry();
+        
+        // Arrays to hold mathematical vectors for each point
+        const positions = new Float32Array(numStars * 3);
+        const colors = new Float32Array(numStars * 3);
+        const sizes = new Float32Array(numStars);
+        
+        const colorPalette = [
+            new THREE.Color(0xffffff), // White
+            new THREE.Color(0x99ccff), // Blue-white (Hotter)
+            new THREE.Color(0xffcc99), // Orange-white (Cooler)
+            new THREE.Color(0x4488ff)  // Deep Blue
+        ];
+
+        // Initialize particles uniformly distributed in a cylindrical/cubic volume
+        for (let i = 0; i < numStars; i++) {
+            const i3 = i * 3;
+            
+            // Random spherical coordinates converted to Cartesian
+            const r = 10 + Math.random() * 800; // Radius from center axis
+            const theta = Math.random() * 2 * Math.PI; // Angle
+            
+            positions[i3] = r * Math.cos(theta);     // x
+            positions[i3 + 1] = r * Math.sin(theta); // y
+            positions[i3 + 2] = STATE.zMin + Math.random() * STATE.domainDepth; // z
+            
+            // Assign random mass/size to star
+            sizes[i] = Math.random() * 2.5 + 0.5;
+
+            // Assign color based on probability
+            const color = colorPalette[Math.floor(Math.random() * colorPalette.length)];
+            colors[i3] = color.r;
+            colors[i3 + 1] = color.g;
+            colors[i3 + 2] = color.b;
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+        // Custom Shader Material to handle dynamic sizing based on perspective
+        // and velocity stretching (Simulating relativistic Doppler shift visually)
+        const material = new THREE.ShaderMaterial({
+            uniforms: {
+                pointTexture: { value: createStarTexture() },
+                velocityData: { value: 0.0 }
+            },
+            vertexShader: `
+                attribute float size;
+                attribute vec3 color;
+                varying vec3 vColor;
+                uniform float velocityData;
+                
+                void main() {
+                    vColor = color;
+                    // Compute projection: P' = ProjectionMatrix * ModelViewMatrix * P
+                    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                    
+                    // Math: Perspective division determines point size on screen.
+                    // Size scales inversely with depth (-mvPosition.z)
+                    // We add a velocity multiplier to simulate blooming at high speeds
+                    float stretch = 1.0 + (velocityData * 0.001);
+                    gl_PointSize = size * (300.0 / -mvPosition.z) * stretch;
+                    
+                    gl_Position = projectionMatrix * mvPosition;
+                }
+            `,
+            fragmentShader: `
+                uniform sampler2D pointTexture;
+                varying vec3 vColor;
+                
+                void main() {
+                    // Sample the radial gradient texture and multiply by star color
+                    vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+                    gl_FragColor = vec4(vColor * texColor.rgb, texColor.a);
+                }
+            `,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+
+        const starSystem = new THREE.Points(geometry, material);
+        scene.add(starSystem);
+
+        // --- USER INTERACTION (Parallax and Kinematic Triggers) ---
+        let targetX = 0;
+        let targetY = 0;
+
+        function updateMouse(event) {
+            let clientX, clientY;
+            if (event.touches) {
+                clientX = event.touches[0].clientX;
+                clientY = event.touches[0].clientY;
+            } else {
+                clientX = event.clientX;
+                clientY = event.clientY;
+            }
+            // Normalize mouse coordinates to [-1, 1] range
+            const normX = (clientX / window.innerWidth) * 2 - 1;
+            const normY = -(clientY / window.innerHeight) * 2 + 1;
+            
+            // Set camera targets for slight parallax
+            targetX = normX * 100;
+            targetY = normY * 100;
+        }
+
+        window.addEventListener('mousemove', updateMouse);
+        window.addEventListener('touchmove', updateMouse, {passive: true});
+
+        function engageHyperdrive() {
+            STATE.isAccelerating = true;
+            instructions.style.opacity = '0';
+        }
+
+        function disengageHyperdrive() {
+            STATE.isAccelerating = false;
+        }
+
+        window.addEventListener('mousedown', engageHyperdrive);
+        window.addEventListener('touchstart', engageHyperdrive, {passive: true});
+        window.addEventListener('mouseup', disengageHyperdrive);
+        window.addEventListener('touchend', disengageHyperdrive);
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- MAIN SIMULATION LOOP ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. Calculate Delta Time (dt)
+            const dt = clock.getDelta();
+
+            // 2. Numerically integrate velocity based on user input (Acceleration)
+            if (STATE.isAccelerating) {
+                // v(t) = v(t-1) + a * dt
+                STATE.currentSpeed += STATE.acceleration * dt;
+                if (STATE.currentSpeed > STATE.warpSpeed) STATE.currentSpeed = STATE.warpSpeed;
+            } else {
+                // Decay back to base speed
+                STATE.currentSpeed -= STATE.deceleration * dt;
+                if (STATE.currentSpeed < STATE.baseSpeed) STATE.currentSpeed = STATE.baseSpeed;
+            }
+
+            // Integrate total distance: S = ∫ v(t) dt
+            STATE.distanceTraveled += STATE.currentSpeed * dt * 0.01; // Scaled for display
+
+            // 3. Update particle positions (Kinematics)
+            const posAttr = geometry.attributes.position;
+            const posArray = posAttr.array;
+            
+            // Distance covered in this frame
+            const deltaZ = STATE.currentSpeed * dt;
+
+            for (let i = 0; i < numStars; i++) {
+                const zIndex = (i * 3) + 2;
+                
+                // Kinematic translation: z_new = z_old + v * dt
+                posArray[zIndex] += deltaZ;
+
+                // Modulo Boundary Logic: Keep particles within finite volume
+                // If a star passes the camera (z > 0 + margin), reset it to the deep back
+                if (posArray[zIndex] > 100) {
+                    // We don't just set it to zMin, we calculate the modulo to prevent bunching
+                    // Math: z_wrapped = ((z - zMin) % Domain) + zMin
+                    const overshoot = posArray[zIndex] - 100;
+                    posArray[zIndex] = STATE.zMin + (overshoot % STATE.domainDepth);
+                    
+                    // Randomize X and Y slightly when resetting to prevent obvious looping patterns
+                    const r = 10 + Math.random() * 800;
+                    const theta = Math.random() * 2 * Math.PI;
+                    posArray[(i * 3)] = r * Math.cos(theta);
+                    posArray[(i * 3) + 1] = r * Math.sin(theta);
+                }
+            }
+            posAttr.needsUpdate = true; // Tell WebGL to push new array to GPU
+
+            // 4. Parallax Camera Movement (Linear Interpolation / Lerp)
+            // LERPing creates a smooth mathematically asymptotic approach to the target
+            camera.position.x += (targetX - camera.position.x) * 2.0 * dt;
+            camera.position.y += (targetY - camera.position.y) * 2.0 * dt;
+            camera.lookAt(0, 0, STATE.zMin); // Always stare into the abyss
+
+            // 5. Relativistic FOV stretching
+            // Normalize speed from 0.0 to 1.0
+            const speedRatio = (STATE.currentSpeed - STATE.baseSpeed) / (STATE.warpSpeed - STATE.baseSpeed);
+            // Math: fov(v) = base_fov + v^2 * (max_fov - base_fov)
+            const targetFov = STATE.baseFov + Math.pow(speedRatio, 2) * (STATE.maxFov - STATE.baseFov);
+            
+            camera.fov += (targetFov - camera.fov) * 5.0 * dt; // Lerp the FOV
+            camera.updateProjectionMatrix();
+
+            // Pass velocity data to shader for stretching effects
+            material.uniforms.velocityData.value = STATE.currentSpeed;
+
+            // 6. Render the scene
+            renderer.render(scene, camera);
+        }
+
+        // Start simulation
+        window.onload = function() {
+            animate();
+        };
+
+    </script>
+</body>
+</html>
